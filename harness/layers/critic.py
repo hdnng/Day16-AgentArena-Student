@@ -78,17 +78,72 @@ class Critic(Middleware):
 
     name = "critic"
 
-    def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+    def _split_fused(self, ctx, text: str) -> list[dict] | None:
+        if " và " not in text:
+            return None
+        parts = text.split(" và ")
+        for i in range(1, len(parts)):
+            left = " và ".join(parts[:i]).strip()
+            right = " và ".join(parts[i:]).strip()
+            if not left or not right:
+                continue
+            if not (ctx.saw(left) and ctx.saw(right)):
+                continue
+            if ctx.corpus is None or not hasattr(ctx.corpus, "docs"):
+                continue
+            left_docs = [
+                doc.doc_id
+                for doc in ctx.corpus.docs
+                if any(left in line for line in doc.body.splitlines())
+            ]
+            right_docs = [
+                doc.doc_id
+                for doc in ctx.corpus.docs
+                if any(right in line for line in doc.body.splitlines())
+            ]
+            for d1 in left_docs:
+                for d2 in right_docs:
+                    if d1 != d2:
+                        return [
+                            {"text": left, "doc_id": d1},
+                            {"text": right, "doc_id": d2},
+                        ]
+        return None
+
+    def after_agent(self, ctx, report: dict) -> dict:
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims:
+            return report
+
+        kept = []
+        fused_any = False
+
+        for claim in claims:
+            text = claim.get("text", "")
+            if ctx.saw(text):
+                kept.append(claim)
+            else:
+                fused = self._split_fused(ctx, text)
+                if fused is not None:
+                    kept.extend(fused)
+                    fused_any = True
+
+        if not kept:
+            report["claims"] = []
+            report["citations"] = []
+            report["abstain"] = True
+            report["answer"] = "Không đủ căn cứ trong tài liệu để trả lời."
+            return report
+
+        report["claims"] = kept
+        if fused_any:
+            report["abstain"] = True
+
+        citations = []
+        for c in kept:
+            doc_id = c.get("doc_id")
+            if doc_id and doc_id not in citations:
+                citations.append(doc_id)
+        report["citations"] = sorted(citations)
+
+        return report
