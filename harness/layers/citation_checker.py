@@ -78,10 +78,10 @@ class CitationChecker(Middleware):
                 continue
             text = claim["text"]
             cited = ctx.corpus.get(claim.get("doc_id"))
-            if cited is not None and text in cited.body.splitlines():
+            if cited is not None and any(text in line for line in cited.body.splitlines()):
                 continue
             for doc in ctx.corpus.docs:
-                if doc.body in observed and text in doc.body.splitlines():
+                if doc.body in observed and any(text in line for line in doc.body.splitlines()):
                     claim["doc_id"] = doc.doc_id
                     break
 
